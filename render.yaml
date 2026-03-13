@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: student-quiz-bot
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: TG_BOT_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.1-8b-instant
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: GROUP_ID
+        sync: false
+      - key: PORT
+        value: 8080
+      - key: DATABASE_URL
+        value: sqlite:///bot_database.db
+    autoDeploy: true
