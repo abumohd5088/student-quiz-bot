@@ -9,7 +9,6 @@ import asyncio
 import random
 from datetime import datetime, date
 from typing import Optional, List, Dict, Any
-from contextlib import contextmanager
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
@@ -20,7 +19,7 @@ from flask import Flask, jsonify
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# Configuration
+# --- CONFIGURATION ---
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
@@ -30,13 +29,13 @@ PORT = int(os.environ.get("PORT", 8080))
 DATABASE_PATH = "bot_database.db"
 
 BOT_NAME = "Student Quiz Bot"
-BOT_VERSION = "2.0"
+BOT_VERSION = "3.0"
 XP_PER_LEVEL = 100
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
+# --- DATABASE MANAGER (No Decorators Used) ---
 class DatabaseManager:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -47,183 +46,195 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         return conn
     
-    @contextmanager    def get_cursor(self):
+    # Replaced @contextmanager with explicit method to prevent syntax errors
+    def execute_safe(self, query, params=None):        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            conn.commit()
+            return cursor
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"DB Error: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def fetch_one(self, query, params=None):
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
-            yield cursor
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"DB error: {e}")
-            raise
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def fetch_all(self, query, params=None):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
     
     def _init_database(self):
-        with self.get_cursor() as cur:
-            cur.execute("""CREATE TABLE IF NOT EXISTS users (
+        queries = [
+            """CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT,
                 xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1, streak INTEGER DEFAULT 0,
                 last_active DATE, joined_date DATE DEFAULT (date('now')),
                 class_level INTEGER DEFAULT 10, total_quizzes INTEGER DEFAULT 0,
-                correct_answers INTEGER DEFAULT 0, language TEXT DEFAULT 'en')""")
-            
-            cur.execute("""CREATE TABLE IF NOT EXISTS quizzes (
+                correct_answers INTEGER DEFAULT 0, language TEXT DEFAULT 'en')""",
+                        """CREATE TABLE IF NOT EXISTS quizzes (
                 quiz_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 question TEXT, options TEXT, correct_index INTEGER,
                 explanation TEXT, subject TEXT, is_correct BOOLEAN DEFAULT 0,
-                time_taken INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                time_taken INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
             
-            cur.execute("""CREATE TABLE IF NOT EXISTS notes (
+            """CREATE TABLE IF NOT EXISTS notes (
                 note_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 title TEXT, content TEXT, subject TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
             
-            cur.execute("""CREATE TABLE IF NOT EXISTS homework (
+            """CREATE TABLE IF NOT EXISTS homework (
                 homework_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 subject TEXT, task TEXT, due_date DATE,
-                is_completed BOOLEAN DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                is_completed BOOLEAN DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
             
-            cur.execute("""CREATE TABLE IF NOT EXISTS reminders (
+            """CREATE TABLE IF NOT EXISTS reminders (
                 reminder_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
                 reminder_time TEXT, message TEXT, is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""",
             
-            cur.execute("""CREATE TABLE IF NOT EXISTS banned_users (
+            """CREATE TABLE IF NOT EXISTS banned_users (
                 user_id INTEGER PRIMARY KEY, reason TEXT,
-                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)""")
-        logger.info("Database initialized")
+                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"""
+        ]
+        
+        for q in queries:
+            self.execute_safe(q)
+        logger.info("Database initialized successfully")
     
     def get_or_create_user(self, user_id, username=None, first_name=None):
-        with self.get_cursor() as cur:            cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            user = cur.fetchone()
-            if not user:
-                cur.execute("INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                           (user_id, username, first_name))
-                cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-                user = cur.fetchone()
-            return dict(user) if user else {}
+        user = self.fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        if not user:
+            self.execute_safe(
+                "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
+                (user_id, username, first_name)
+            )
+            user = self.fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        return user if user else {}
     
     def add_xp(self, user_id, xp_amount):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT xp, level FROM users WHERE user_id = ?", (user_id,))
-            user = cur.fetchone()
-            if not user:
-                return {"xp": xp_amount, "level": 1}
-            new_xp = user["xp"] + xp_amount
-            new_level = user["level"]
-            while new_xp >= (new_level * XP_PER_LEVEL):
-                new_level += 1
-            cur.execute("UPDATE users SET xp = ?, level = ? WHERE user_id = ?",
-                       (new_xp, new_level, user_id))
-            return {"xp": new_xp, "level": new_level}
+        user = self.fetch_one("SELECT xp, level FROM users WHERE user_id = ?", (user_id,))
+        if not user:
+            return {"xp": xp_amount, "level": 1}
+        
+        new_xp = user["xp"] + xp_amount
+        new_level = user["level"]
+        while new_xp >= (new_level * XP_PER_LEVEL):
+            new_level += 1
+                self.execute_safe("UPDATE users SET xp = ?, level = ? WHERE user_id = ?", (new_xp, new_level, user_id))
+        return {"xp": new_xp, "level": new_level}
     
     def update_streak(self, user_id):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT streak, last_active FROM users WHERE user_id = ?", (user_id,))
-            user = cur.fetchone()
-            if not user:
-                return {"streak": 1}
-            current_streak = user["streak"]
-            if user["last_active"]:
-                last_date = datetime.strptime(user["last_active"], "%Y-%m-%d").date()
-                days_diff = (date.today() - last_date).days
-                if days_diff == 1:
-                    current_streak += 1
-                elif days_diff > 1:
-                    current_streak = 1
-            else:
+        user = self.fetch_one("SELECT streak, last_active FROM users WHERE user_id = ?", (user_id,))
+        if not user:
+            return {"streak": 1}
+        
+        current_streak = user["streak"]
+        if user["last_active"]:
+            last_date = datetime.strptime(user["last_active"], "%Y-%m-%d").date()
+            days_diff = (date.today() - last_date).days
+            if days_diff == 1:
+                current_streak += 1
+            elif days_diff > 1:
                 current_streak = 1
-            cur.execute("UPDATE users SET streak = ? WHERE user_id = ?",
-                       (current_streak, user_id))
-            return {"streak": current_streak}
+        else:
+            current_streak = 1
+            
+        self.execute_safe("UPDATE users SET streak = ? WHERE user_id = ?", (current_streak, user_id))
+        return {"streak": current_streak}
     
     def get_user_stats(self, user_id):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
-            user = dict(cur.fetchone() or {})
-            cur.execute("""SELECT COUNT(*) as total,
-                SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct
-                FROM quizzes WHERE user_id = ?""", (user_id,))            quiz_stats = dict(cur.fetchone() or {})
-            user["quiz_stats"] = quiz_stats
-            total = quiz_stats.get("total", 0)
-            correct = quiz_stats.get("correct", 0)
-            user["accuracy"] = round(correct / total * 100, 1) if total > 0 else 0
-            return user
+        user = self.fetch_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
+        if not user: return {}
+        
+        stats = self.fetch_one(
+            "SELECT COUNT(*) as total, SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END) as correct FROM quizzes WHERE user_id = ?", 
+            (user_id,)
+        )
+        total = stats.get("total", 0) if stats else 0
+        correct = stats.get("correct", 0) if stats else 0
+        
+        user["quiz_stats"] = {"total": total, "correct": correct}
+        user["accuracy"] = round(correct / total * 100, 1) if total > 0 else 0
+        return user
     
     def get_leaderboard(self, limit=10):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT user_id, username, first_name, xp, level FROM users ORDER BY xp DESC LIMIT ?", (limit,))
-            return [dict(row) for row in cur.fetchall()]
+        return self.fetch_all("SELECT user_id, username, first_name, xp, level FROM users ORDER BY xp DESC LIMIT ?", (limit,))
     
     def is_banned(self, user_id):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
-            return cur.fetchone() is not None
+        res = self.fetch_one("SELECT 1 FROM banned_users WHERE user_id = ?", (user_id,))
+        return res is not None
     
     def save_note(self, user_id, title, content, subject="general"):
-        with self.get_cursor() as cur:
-            cur.execute("INSERT INTO notes (user_id, title, content, subject) VALUES (?, ?, ?, ?)",
-                       (user_id, title, content, subject))
-            return cur.lastrowid
+        self.execute_safe("INSERT INTO notes (user_id, title, content, subject) VALUES (?, ?, ?, ?)",
+                         (user_id, title, content, subject))
+        return self.fetch_one("SELECT last_insert_rowid() as id")['id']
     
-    def get_notes(self, user_id):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT * FROM notes WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
-            return [dict(row) for row in cur.fetchall()]
+    def get_notes(self, user_id):        return self.fetch_all("SELECT * FROM notes WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
     
     def add_homework(self, user_id, subject, task, due_date):
-        with self.get_cursor() as cur:
-            cur.execute("INSERT INTO homework (user_id, subject, task, due_date) VALUES (?, ?, ?, ?)",
-                       (user_id, subject, task, due_date))
-            return cur.lastrowid
+        self.execute_safe("INSERT INTO homework (user_id, subject, task, due_date) VALUES (?, ?, ?, ?)",
+                         (user_id, subject, task, due_date))
+        return self.fetch_one("SELECT last_insert_rowid() as id")['id']
     
     def get_pending_homework(self, user_id):
-        with self.get_cursor() as cur:
-            cur.execute("SELECT * FROM homework WHERE user_id = ? AND is_completed = 0 ORDER BY due_date",
-                       (user_id,))
-            return [dict(row) for row in cur.fetchall()]
+        return self.fetch_all("SELECT * FROM homework WHERE user_id = ? AND is_completed = 0 ORDER BY due_date", (user_id,))
     
     def complete_homework(self, user_id, homework_id):
-        with self.get_cursor() as cur:
-            cur.execute("UPDATE homework SET is_completed = 1 WHERE homework_id = ? AND user_id = ?",
-                       (homework_id, user_id))
-            return cur.rowcount > 0
+        self.execute_safe("UPDATE homework SET is_completed = 1 WHERE homework_id = ? AND user_id = ?", (homework_id, user_id))
+        return True
     
     def add_reminder(self, user_id, reminder_time, message):
-        with self.get_cursor() as cur:
-            cur.execute("INSERT INTO reminders (user_id, reminder_time, message) VALUES (?, ?, ?)",
-                       (user_id, reminder_time, message))            return cur.lastrowid
+        self.execute_safe("INSERT INTO reminders (user_id, reminder_time, message) VALUES (?, ?, ?)",
+                         (user_id, reminder_time, message))
+        return self.fetch_one("SELECT last_insert_rowid() as id")['id']
     
     def get_active_reminders(self):
         current_time = datetime.now().strftime("%H:%M")
-        with self.get_cursor() as cur:
-            cur.execute("SELECT * FROM reminders WHERE reminder_time = ? AND is_active = 1",
-                       (current_time,))
-            return [dict(row) for row in cur.fetchall()]
+        return self.fetch_all("SELECT * FROM reminders WHERE reminder_time = ? AND is_active = 1", (current_time,))
 
-
+# --- AI MANAGER ---
 class AIManager:
     def __init__(self, api_key, model):
         self.client = Groq(api_key=api_key) if api_key else None
         self.model = model
         self.fallback_questions = [
             {"q": "What is 15 + 27?", "options": ["40", "42", "45", "52"], "a": 1, "e": "15 + 27 = 42"},
-            {"q": "What is the capital of France?", "options": ["London", "Berlin", "Paris", "Madrid"], "a": 2, "e": "Paris is the capital"},
-            {"q": "What is H2O?", "options": ["Salt", "Sugar", "Water", "Oxygen"], "a": 2, "e": "H2O is water"},
+            {"q": "Capital of France?", "options": ["London", "Berlin", "Paris", "Madrid"], "a": 2, "e": "Paris is capital"},
+            {"q": "H2O is?", "options": ["Salt", "Sugar", "Water", "Oxygen"], "a": 2, "e": "H2O is water"},
         ]
     
     def generate_quiz_question(self, subject, class_level, difficulty="medium"):
         if not self.client:
             return random.choice(self.fallback_questions)
         try:
-            prompt = f"Generate a {difficulty} {subject} quiz question for class {class_level}. Return JSON with: question, options (4), correct_index (0-3), explanation"
+            prompt = f"Generate a {difficulty} {subject} quiz question for class {class_level}. Return JSON: {{'question': '', 'options': [], 'correct_index': 0, 'explanation': ''}}"
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                timeout=30
+                model=self.model, messages=[{"role": "user", "content": prompt}], max_tokens=300, timeout=30
             )
             return json.loads(response.choices[0].message.content)
         except:
@@ -231,37 +242,30 @@ class AIManager:
     
     def explain_concept(self, concept, class_level):
         if not self.client:
-            return f"*{concept}*: Check your textbook for details!"
-        try:
-            prompt = f"Explain {concept} for class {class_level} student in simple terms with examples."
+            return f"*{concept}*: Check your textbook!"
+        try:            prompt = f"Explain {concept} simply for class {class_level}."
             response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=300,
-                timeout=30
+                model=self.model, messages=[{"role": "user", "content": prompt}], max_tokens=300, timeout=30
             )
             return response.choices[0].message.content
         except:
-            return f"*{concept}*: Important topic! Study well!"
+            return f"*{concept}*: Important topic!"
 
+# --- FLASK SERVER ---
 def create_flask_app():
     app = Flask(__name__)
-    
     @app.route('/')
     def home():
-        return jsonify({"bot": BOT_NAME, "version": BOT_VERSION, "status": "running"})
-    
+        return jsonify({"bot": BOT_NAME, "status": "running"})
     @app.route('/health')
     def health():
         return jsonify({"status": "healthy"}), 200
-    
     @app.route('/ping')
     def ping():
-        return jsonify({"status": "pong", "timestamp": datetime.now().isoformat()}), 200
-    
+        return jsonify({"status": "pong"}), 200
     return app
 
-
+# --- MAIN BOT CLASS ---
 class QuizBot:
     def __init__(self):
         self.db = DatabaseManager(DATABASE_PATH)
@@ -278,21 +282,20 @@ class QuizBot:
         logger.info("Bot initialized")
     
     def _register_handlers(self):
-        commands = {
+        cmds = {
             "start": self.cmd_start, "help": self.cmd_help, "ping": self.cmd_ping,
             "study": self.cmd_study, "explain": self.cmd_explain, "quiz": self.cmd_quiz,
             "dailyquiz": self.cmd_dailyquiz, "profile": self.cmd_profile,
             "leaderboard": self.cmd_leaderboard, "notes": self.cmd_notes,
             "savenote": self.cmd_savenote, "homework": self.cmd_homework,
             "word": self.cmd_word, "fact": self.cmd_fact, "calc": self.cmd_calc,
-            "timer": self.cmd_timer, "admin": self.cmd_admin,
-            "feedback": self.cmd_feedback
+            "timer": self.cmd_timer, "admin": self.cmd_admin, "feedback": self.cmd_feedback
         }
-        for cmd, handler in commands.items():
-            self.app.add_handler(CommandHandler(cmd, handler))
-        self.app.add_handler(CallbackQueryHandler(self.handle_callback))
+        for cmd, handler in cmds.items():
+            self.app.add_handler(CommandHandler(cmd, handler))        self.app.add_handler(CallbackQueryHandler(self.handle_callback))
     
-    def _setup_scheduler(self):        self.scheduler = AsyncIOScheduler()
+    def _setup_scheduler(self):
+        self.scheduler = AsyncIOScheduler()
         self.scheduler.add_job(self._daily_reminder, CronTrigger(hour=9, minute=0))
         self.scheduler.add_job(self._check_reminders, 'interval', minutes=1)
     
@@ -301,7 +304,7 @@ class QuizBot:
         def run():
             flask_app.run(host='0.0.0.0', port=PORT, threaded=True)
         threading.Thread(target=run, daemon=True).start()
-        logger.info(f"Flask on port {PORT}")
+        logger.info(f"Flask running on port {PORT}")
     
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
@@ -309,47 +312,15 @@ class QuizBot:
             await update.message.reply_text("Access restricted.")
             return
         self.db.get_or_create_user(user.id, user.username, user.first_name)
-        text = f"""*Welcome to {BOT_NAME}!*
-
-Hello *{user.first_name}*! I'm your study companion.
-
-*Commands:*
-• /dailyquiz - Random quiz
-• /study <topic> - Learn
-• /profile - Your stats
-• /help - All commands
-
-Let's learn!"""
+        text = f"*Welcome to {BOT_NAME}!*\n\nHello *{user.first_name}*!\n\n/start to begin.\n/help for commands."
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = """*Commands:*
-
-*Learning:*
-/study <topic> - AI lesson
-/explain <concept> - Explanation
-/quiz <subject> - Subject quiz
-
-*Fun:*
-/dailyquiz - Daily challenge
-/leaderboard - Top students
-/profile - Your stats
-
-*Tools:*
-/notes - View notes
-/savenote <title> <text> - Save
-/homework - Track homework
-
-*Utilities:*
-/word - Word of day/fact - Fun fact
-/calc <expr> - Calculator
-/timer <min> - Study timer
-
-/feedback - Contact admin"""
+        text = "*Commands:*\n/study, /quiz, /dailyquiz, /profile, /leaderboard, /notes, /homework, /calc, /timer"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_ping(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text(f"*Pong!*\nBot: ONLINE\nTime: {datetime.now().strftime('%H:%M:%S')}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"*Pong!* Bot Online.", parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_study(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
@@ -370,8 +341,7 @@ Let's learn!"""
         await update.message.chat.send_action("typing")
         explanation = self.ai.explain_concept(concept, 10)
         await update.message.reply_text(explanation, parse_mode=ParseMode.MARKDOWN)
-    
-    async def cmd_quiz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def cmd_quiz(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         subject = context.args[0] if context.args else "general"
         await update.message.chat.send_action("typing")
         q = self.ai.generate_quiz_question(subject, 10)
@@ -390,7 +360,8 @@ Let's learn!"""
         streak = self.db.update_streak(update.effective_user.id)
         await update.message.reply_poll(
             question=f"Daily Quiz: {q['q']}",
-            options=q["options"],            type="quiz",
+            options=q["options"],
+            type="quiz",
             correct_option_id=q["a"],
             explanation=q["e"],
             is_anonymous=False
@@ -399,35 +370,27 @@ Let's learn!"""
     
     async def cmd_profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = self.db.get_user_stats(update.effective_user.id)
-        text = f"""*{update.effective_user.first_name}'s Profile*
-
-Level: {stats.get('level', 1)}
-XP: {stats.get('xp', 0)}
-Streak: {stats.get('streak', 0)} days
-Quizzes: {stats['quiz_stats'].get('total', 0)}
-Accuracy: {stats.get('accuracy', 0)}%"""
+        text = f"*Profile*\nLevel: {stats.get('level', 1)}\nXP: {stats.get('xp', 0)}\nStreak: {stats.get('streak', 0)}"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_leaderboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         top = self.db.get_leaderboard(10)
-        text = "*Leaderboard*\n\n"
+        text = "*Leaderboard*\n"
         for i, u in enumerate(top, 1):
-            medal = ["1", "2", "3"][i-1] if i <= 3 else str(i)
             name = u["username"] or u["first_name"] or f"User{u['user_id']}"
-            text += f"{medal}. *{name}*: {u['xp']} XP (Lvl {u['level']})\n"
+            text += f"{i}. *{name}*: {u['xp']} XP\n"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_notes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         notes = self.db.get_notes(update.effective_user.id)
         if not notes:
-            await update.message.reply_text("No notes yet. Use /savenote!")
+            await update.message.reply_text("No notes yet.")
             return
-        text = "*Your Notes:*\n\n"
-        for n in notes[:10]:
-            text += f"*{n['title']}*\n{n['content'][:100]}\n\n"
+        text = "*Your Notes:*\n"
+        for n in notes[:5]:
+            text += f"- *{n['title']}*\n"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-    
-    async def cmd_savenote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        async def cmd_savenote(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(context.args) < 2:
             await update.message.reply_text("Usage: /savenote <title> <content>")
             return
@@ -439,7 +402,8 @@ Accuracy: {stats.get('accuracy', 0)}%"""
     async def cmd_homework(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if context.args and context.args[0] != "list":
             if len(context.args) < 3:
-                await update.message.reply_text("Usage: /homework <subject> <task> <due_date>")                return
+                await update.message.reply_text("Usage: /homework <sub> <task> <date>")
+                return
             hw_id = self.db.add_homework(update.effective_user.id, context.args[0], " ".join(context.args[1:-1]), context.args[-1])
             await update.message.reply_text(f"Homework added! ID: #{hw_id}")
             return
@@ -447,26 +411,23 @@ Accuracy: {stats.get('accuracy', 0)}%"""
         if not pending:
             await update.message.reply_text("No pending homework!")
             return
-        text = "*Pending Homework:*\n\n"
+        text = "*Pending Homework:*\n"
         for h in pending:
-            text += f"*{h['subject']}*: {h['task']} (Due: {h['due_date']})\n"
+            text += f"- *{h['subject']}*: {h['task']}\n"
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        words = [
-            {"w": "Ephemeral", "m": "Lasting briefly", "e": "Ephemeral beauty"},
-            {"w": "Resilient", "m": "Bouncing back", "e": "Resilient student"},
-        ]
+        words = [{"w": "Ephemeral", "m": "Short lived"}, {"w": "Resilient", "m": "Tough"}]
         w = random.choice(words)
-        await update.message.reply_text(f"*Word: {w['w']}*\n{w['m']}\nExample: {w['e']}", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"*Word:* {w['w']}\nMeaning: {w['m']}", parse_mode=ParseMode.MARKDOWN)
     
     async def cmd_fact(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        facts = ["Brain uses 20% of body energy!", "Honey never spoils!", "Octopuses have 3 hearts!"]
+        facts = ["Brain uses 20% energy!", "Honey never spoils!"]
         await update.message.reply_text(f"Fact: {random.choice(facts)}")
     
     async def cmd_calc(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("Usage: /calc <expression>")
+            await update.message.reply_text("Usage: /calc <expr>")
             return
         expr = " ".join(context.args)
         try:
@@ -477,34 +438,34 @@ Accuracy: {stats.get('accuracy', 0)}%"""
     
     async def cmd_timer(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("Usage: /timer <minutes>")
-            return
-        try:
+            await update.message.reply_text("Usage: /timer <mins>")
+            return        try:
             mins = int(context.args[0])
-            await update.message.reply_text(f"Timer set for {mins} minutes!")
+            await update.message.reply_text(f"Timer set for {mins} mins!")
             async def notify():
                 await asyncio.sleep(mins * 60)
                 await update.message.reply_text("Time's up!")
             asyncio.create_task(notify())
         except:
             await update.message.reply_text("Invalid number")
-        async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    
+    async def cmd_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id != ADMIN_USER_ID:
             await update.message.reply_text("Admin only!")
             return
-        await update.message.reply_text(f"*Admin Panel*\nUsers can use /feedback")
+        await update.message.reply_text(f"*Admin Panel*")
     
     async def cmd_feedback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
-            await update.message.reply_text("Usage: /feedback <message>")
+            await update.message.reply_text("Usage: /feedback <msg>")
             return
         msg = " ".join(context.args)
         if ADMIN_USER_ID:
             try:
-                await context.bot.send_message(ADMIN_USER_ID, f"Feedback from {update.effective_user.first_name}: {msg}")
-                await update.message.reply_text("Sent to admin!")
+                await context.bot.send_message(ADMIN_USER_ID, f"Feedback: {msg}")
+                await update.message.reply_text("Sent!")
             except:
-                await update.message.reply_text("Could not send")
+                await update.message.reply_text("Failed")
     
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
@@ -523,12 +484,11 @@ Accuracy: {stats.get('accuracy', 0)}%"""
     async def error_handler(self, update, context):
         logger.error(f"Error: {context.error}")
         if update and update.effective_message:
-            await update.effective_message.reply_text("Something went wrong. Try again.")
+            await update.effective_message.reply_text("Something went wrong.")
     
     async def run(self):
         await self.initialize()
-        self.app.add_error_handler(self.error_handler)
-        self.scheduler.start()
+        self.app.add_error_handler(self.error_handler)        self.scheduler.start()
         logger.info("Scheduler started")
         
         while True:
@@ -536,11 +496,11 @@ Accuracy: {stats.get('accuracy', 0)}%"""
                 await self.app.run_polling(drop_pending_updates=True)
                 break
             except NetworkError as e:
-                logger.warning(f"Network error, retrying: {e}")
-                await asyncio.sleep(5)            except Exception as e:
+                logger.warning(f"Network error: {e}")
+                await asyncio.sleep(5)
+            except Exception as e:
                 logger.error(f"Critical error: {e}")
                 await asyncio.sleep(10)
-
 
 def main():
     if not TG_BOT_TOKEN:
@@ -554,7 +514,6 @@ def main():
     except Exception as e:
         logger.error(f"Fatal: {e}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
