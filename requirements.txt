@@ -1,1 +1,4 @@
 python-telegram-bot==20.7
+flask==3.0.0
+groq==0.4.2
+apscheduler==3.10.4
