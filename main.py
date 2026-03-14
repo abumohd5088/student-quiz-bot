@@ -1,12 +1,11 @@
 import os
 import logging
 import random
-import json
 from datetime import datetime, timedelta
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from groq import Groq
 
 logging.basicConfig(level=logging.INFO)
@@ -14,26 +13,23 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv("TG_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-app = ApplicationBuilder().token(TOKEN).build()
-
-scheduler = AsyncIOScheduler()
-scheduler.start()
-
-# --- AI ---
+# ---- AI ----
 groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
-# --- memory db ---
+# ---- Scheduler (fixed) ----
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# ---- Memory DB ----
 users = {}
 
 def get_user(uid):
     if uid not in users:
-        users[uid] = {"xp":0,"streak":0,"quizzes":0}
+        users[uid] = {"xp":0,"quizzes":0}
     return users[uid]
 
-# -------- AI --------
-
+# ---- AI Answer ----
 def ai_answer(prompt):
-
     if not groq:
         return "AI not configured"
 
@@ -46,27 +42,23 @@ def ai_answer(prompt):
     except:
         return "AI error"
 
-# -------- COMMANDS --------
+# ---- Commands ----
 
 async def start(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
     user=get_user(update.effective_user.id)
 
     msg=f"""
 🎓 Welcome {update.effective_user.first_name}
 
 XP: {user['xp']}
-Streak: {user['streak']}
+Quizzes: {user['quizzes']}
 
 Commands:
 /quiz
 /ai question
 /profile
-/leaderboard
 """
-
     await update.message.reply_text(msg)
-
 
 async def quiz(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
@@ -88,7 +80,6 @@ async def quiz(update:Update,context:ContextTypes.DEFAULT_TYPE):
     user=get_user(update.effective_user.id)
     user["quizzes"]+=1
 
-
 async def ai(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
@@ -103,7 +94,6 @@ async def ai(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(answer)
 
-
 async def profile(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     user=get_user(update.effective_user.id)
@@ -112,38 +102,26 @@ async def profile(update:Update,context:ContextTypes.DEFAULT_TYPE):
         f"XP: {user['xp']}\nQuizzes: {user['quizzes']}"
     )
 
-
-async def leaderboard(update:Update,context:ContextTypes.DEFAULT_TYPE):
-
-    top=sorted(users.items(),key=lambda x:x[1]["xp"],reverse=True)[:10]
-
-    text="🏆 Leaderboard\n\n"
-
-    for i,(uid,data) in enumerate(top,1):
-        text+=f"{i}. {uid} — {data['xp']} XP\n"
-
-    await update.message.reply_text(text)
-
-
 async def reminder(update:Update,context:ContextTypes.DEFAULT_TYPE):
 
     minutes=int(context.args[0])
     chat=update.effective_chat.id
 
     def send():
-        app.bot.send_message(chat_id=chat,text="⏰ Reminder!")
+        context.bot.send_message(chat_id=chat,text="⏰ Reminder!")
 
     scheduler.add_job(send,"date",run_date=datetime.now()+timedelta(minutes=minutes))
 
     await update.message.reply_text("Reminder set")
 
-# -------- register --------
+# ---- Bot ----
+
+app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start",start))
 app.add_handler(CommandHandler("quiz",quiz))
 app.add_handler(CommandHandler("ai",ai))
 app.add_handler(CommandHandler("profile",profile))
-app.add_handler(CommandHandler("leaderboard",leaderboard))
 app.add_handler(CommandHandler("reminder",reminder))
 
 print("Bot started")
