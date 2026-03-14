@@ -1,6 +1,6 @@
 import os
 import asyncio
-import logging
+import threading
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -8,41 +8,27 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 TOKEN = os.getenv("TG_BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 
-logging.basicConfig(level=logging.INFO)
-
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return {"status": "Bot running"}
-
-@app.route("/ping")
-def ping():
-    return {"ping": "pong"}
+    return "Bot running"
 
 # -------- TELEGRAM COMMANDS --------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎓 Welcome to Student Quiz Bot!\n\n"
-        "/quiz - random quiz\n"
-        "/ping - check bot"
-    )
+    await update.message.reply_text("Hello! Quiz bot working ✅")
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🏓 Pong! Bot is working.")
+    await update.message.reply_text("🏓 Pong!")
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    question = "What is 7 × 8?"
-    options = ["54", "56", "63", "48"]
-    correct = 1
-
     await update.message.reply_poll(
-        question=question,
-        options=options,
+        question="What is 7 × 8?",
+        options=["54","56","63","48"],
         type="quiz",
-        correct_option_id=correct,
+        correct_option_id=1,
         explanation="7 × 8 = 56",
         is_anonymous=False
     )
@@ -57,16 +43,17 @@ async def run_bot():
     application.add_handler(CommandHandler("ping", ping))
     application.add_handler(CommandHandler("quiz", quiz))
 
-    print("Bot started...")
+    print("Telegram bot started...")
     await application.run_polling()
+
+def start_bot():
+    asyncio.run(run_bot())
 
 # -------- MAIN --------
 
-def main():
-    loop = asyncio.get_event_loop()
-    loop.create_task(run_bot())
+if __name__ == "__main__":
+
+    bot_thread = threading.Thread(target=start_bot)
+    bot_thread.start()
 
     app.run(host="0.0.0.0", port=PORT)
-
-if __name__ == "__main__":
-    main()
