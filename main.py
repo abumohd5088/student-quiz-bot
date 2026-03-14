@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 from flask import Flask, request
@@ -15,15 +16,29 @@ app = Application.builder().token(TOKEN).build()
 flask_app = Flask(__name__)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎓 Quiz Bot is working! /quiz")
+    await update.message.reply_text("🎓 Quiz Bot is working! Try /quiz")
 
 async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_poll(
         question="What is 2 + 2?",
         options=["3", "4", "5", "6"],
         type="quiz",
-        correct_option_id=1
+        correct_option_id=1,
+        explanation="Correct! 2 + 2 = 4"
     )
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📚 Available commands:\n/quiz - Take a quiz\n/start - Welcome message")
+
+# Register handlers
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("quiz", quiz))
+app.add_handler(CommandHandler("help", help_cmd))
+
+# Root route (fixes "Method Not Allowed")
+@flask_app.route('/', methods=['GET'])
+def index():
+    return "🎓 Student Quiz Bot is running! Visit /setwebhook to configure"
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
@@ -35,7 +50,7 @@ def webhook():
 def set_webhook():
     url = f"{URL}/webhook"
     app.bot.set_webhook(url)
-    return f"Webhook set to {url}"
+    return f"✅ Webhook set to: {url}"
 
 @flask_app.route('/health', methods=['GET'])
 def health():
